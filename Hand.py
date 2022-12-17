@@ -1,119 +1,112 @@
 import cv2
 import mediapipe as mp
+import numpy as np
+from tensorflow.keras.models import load_model
+from djitellopy import tello
 
+drone = tello.Tello()  # 드론객체 생성
 
-mp_drawing = mp.solutions.drawing_utils #Drawing Lines of Hand's Node
-mp_hands = mp.solutions.hands
+class Hand:
+    def __int__(self, command=None):
+        self.command = command
 
+    def motion(self):
+        actions = ['forward', 'back', 'left', 'right', 'up', 'down']
+        seq_length = 30
 
+        model = load_model('models/model.h5')
 
-class Hand_value:
-    def updown_Value(init):
-        cam = cv2.VideoCapture(0)  # 0d은 0번째 카메라
-        with mp_hands.Hands(
+        # MediaPipe hands model
+        mp_hands = mp.solutions.hands
+        mp_drawing = mp.solutions.drawing_utils
+        hands = mp_hands.Hands(
             max_num_hands=1,
             min_detection_confidence=0.5,
-            min_tracking_confidence=0.5) as hands:
+            min_tracking_confidence=0.5)
 
-            while cam.isOpened():
-                success, image = cam.read()
-                if not success:
-                    continue
-                image = cv2.cvtColor(cv2.flip(image, 1), cv2.COLOR_BGR2RGB) #flip = 좌우반전, 색 전처리
-                results = hands.process(image)
+        cap = cv2.VideoCapture(0)
 
-                image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        seq = []
+        action_seq = []
 
-                if results.multi_hand_landmarks:
-                    for hand_landmarks in results.multi_hand_landmarks:
-                        thumb = hand_landmarks.landmark[4]
-                        mid = hand_landmarks.landmark[12]
-                        ret = abs(mid.y - thumb.y) * 100  # (중지-엄지) y축값
+        while cap.isOpened():
+            ret, img = cap.read()
+            img0 = img.copy()
 
-                        cv2.putText(
-                            image, text='Value: %d' % ret, org=(10, 30),
-                            fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=1,
-                            color=255, thickness=2)
+            img = cv2.flip(img, 1)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            result = hands.process(img)
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
-                        mp_drawing.draw_landmarks(
-                            image, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-                if cv2.waitKey(1) == ord('q'):
-                    break
-            cam.release()
-        return ret
+            if result.multi_hand_landmarks is not None:
+                for res in result.multi_hand_landmarks:
+                    joint = np.zeros((21, 4))
+                    for j, lm in enumerate(res.landmark):
+                        joint[j] = [lm.x, lm.y, lm.z, lm.visibility]
+
+                    # Compute angles between joints
+                    v1 = joint[[0,1,2,3,0,5,6,7,0,9,10,11,0,13,14,15,0,17,18,19], :3] # Parent joint
+                    v2 = joint[[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20], :3] # Child joint
+                    v = v2 - v1 # [20, 3]
+                    # Normalize v
+                    v = v / np.linalg.norm(v, axis=1)[:, np.newaxis]
+
+                    # Get angle using arcos of dot product
+                    angle = np.arccos(np.einsum('nt,nt->n',
+                        v[[0,1,2,4,5,6,8,9,10,12,13,14,16,17,18],:],
+                        v[[1,2,3,5,6,7,9,10,11,13,14,15,17,18,19],:])) # [15,]
+
+                    angle = np.degrees(angle) # Convert radian to degree
+
+                    d = np.concatenate([joint.flatten(), angle])
+
+                    seq.append(d)
+
+                    mp_drawing.draw_landmarks(img, res, mp_hands.HAND_CONNECTIONS)
+
+                    if len(seq) < seq_length:
+                        continue
+
+                    input_data = np.expand_dims(np.array(seq[-seq_length:], dtype=np.float32), axis=0)
+
+                    y_pred = model.predict(input_data).squeeze()
+
+                    i_pred = int(np.argmax(y_pred))
+                    conf = y_pred[i_pred]
+
+                    if conf < 0.9:
+                        continue
+
+                    action = actions[i_pred]
+                    action_seq.append(action)
+
+                    if len(action_seq) < 3:
+                        continue
+
+                    this_action = '?'
+                    if action_seq[-1] == action_seq[-2] == action_seq[-3]:
+                        this_action = action
+
+                        if last_action != this_action:
+                            if self.command:
+                                if this_action == 'foward' and self.command == '앞으로':
+                                    drone.send_rc_control(0,1,0,0)
+                                elif this_action == 'back' and self.command == '뒤로':
+                                    drone.send_rc_control(0, -1, 0, 0)
+                                elif this_action == 'left' and self.command == '왼쪽':
+                                    drone.send_rc_control(-1, 0, 0, 0)
+                                elif this_action == 'right' and self.command == '오른쪽':
+                                    drone.send_rc_control(1, 0, 0, 0)
+                                elif this_action == 'up' and self.command == '위':
+                                    drone.send_rc_control(0, 0, 1, 0)  # 위로 이동
+                                elif this_action == 'down' and self.command == '아래':
+                                    drone.send_rc_control(0, 0, -1, 0)  # 위로 이동
+                            last_action = this_action
 
 
-    def leftright_Value(init):
-        cam = cv2.VideoCapture(0)  # 0d은 0번째 카메라
-        with mp_hands.Hands(
-            max_num_hands=1,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5) as hands:
 
-            while cam.isOpened():
-                success, image = cam.read()
-                if not success:
-                    continue
-                image = cv2.cvtColor(cv2.flip(image, 1), cv2.COLOR_BGR2RGB) #flip = 좌우반전, 색 전처리
-                results = hands.process(image)
+                    cv2.putText(img, f'{this_action.upper()}', org=(int(res.landmark[0].x * img.shape[1]), int(res.landmark[0].y * img.shape[0] + 20)),fontFace=cv2.FONT_HERSHEY_SIMPLEX,fontScale=1, color=(255, 255, 255), thickness=2)
 
-                image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-
-                if results.multi_hand_landmarks:
-                    for hand_landmarks in results.multi_hand_landmarks:
-                        thumb = hand_landmarks.landmark[4]
-                        mid = hand_landmarks.landmark[12]
-                        ret = abs(mid.x - thumb.x) * 100  # (중지-엄지) x축값
-
-                        cv2.putText(
-                            image, text='Value: %d' % ret, org=(10, 30),
-                            fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=1,
-                            color=255, thickness=2)
-
-                        mp_drawing.draw_landmarks(
-                            image, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-
-
-
-                cv2.imshow('image', image)
-                if cv2.waitKey(1) == ord('q'):
-                    break
-            cam.release()
-            return ret
-
-    def forwardback_Value(init):
-        cam = cv2.VideoCapture(0)  # 0d은 0번째 카메라
-        with mp_hands.Hands(
-            max_num_hands=1,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5) as hands:
-
-            while cam.isOpened():
-                success, image = cam.read()
-                if not success:
-                    continue
-                image = cv2.cvtColor(cv2.flip(image, 1), cv2.COLOR_BGR2RGB) #flip = 좌우반전, 색 전처리
-                results = hands.process(image)
-
-                image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-
-                if results.multi_hand_landmarks:
-                    for hand_landmarks in results.multi_hand_landmarks:
-                        thumb = hand_landmarks.landmark[4]
-                        mid = hand_landmarks.landmark[12]
-                        buttom = hand_landmarks.landmark[0]
-                        baby = hand_landmarks.landmark[20]
-                        ret = abs((mid.y - buttom.y) * (thumb.x - baby.x)) * 100  # 손면적
-
-                        cv2.putText(
-                            image, text='Value: %d' % ret, org=(10, 30),
-                            fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=1,
-                            color=255, thickness=2)
-
-                        mp_drawing.draw_landmarks(
-                            image, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-                cv2.imshow('image', image)
-                if cv2.waitKey(1) == ord('q'):
-                    break
-            cam.release()
-            return ret
+            cv2.imshow('img', img)
+            if cv2.waitKey(1) == ord('q'):
+                break
